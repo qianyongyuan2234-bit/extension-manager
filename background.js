@@ -1,4 +1,6 @@
 // Service worker — polls CLI bridge via chrome.alarms (MV3-safe)
+importScripts("shared/sider-page-fns.js");
+
 const BRIDGE_URL = "http://127.0.0.1:8766";
 const SIDER_URL = "https://sider.ai/";
 
@@ -90,100 +92,20 @@ function waitForTabReady(tabId) {
 // ---- Injected operations ----
 async function detectModels(tabId) {
   try {
-    const [r] = await chrome.scripting.executeScript({
-      target: { tabId },
-      func: () => {
-        const modelNames = ["GPT-4", "Claude", "Gemini", "Llama", "Mistral", "Grok", "DeepSeek", "o1", "o3", "opus", "sonnet", "haiku"];
-        const all = document.querySelectorAll("button, [role='option'], [role='button'], select option, .item, .option, [class*='model'], [class*='Model'], li");
-        const seen = new Set();
-        const options = [];
-        let current = "";
-        for (const el of all) {
-          const text = (el.textContent || "").trim();
-          if (text.length < 2 || text.length > 40 || seen.has(text)) continue;
-          for (const name of modelNames) {
-            if (text.toLowerCase().includes(name.toLowerCase())) {
-              seen.add(text);
-              options.push(text);
-              if (el.selected || el.getAttribute("aria-selected") === "true" || el.classList.contains("active") || el.classList.contains("selected")) {
-                current = text;
-              }
-              break;
-            }
-          }
-        }
-        return { options: [...options], current };
-      },
-    });
+    const [r] = await chrome.scripting.executeScript({ target: { tabId }, func: detectModels });
     return r?.result || { options: [], current: "" };
   } catch { return { options: [], current: "" }; }
 }
 
 async function switchModel(tabId, modelName) {
   try {
-    await chrome.scripting.executeScript({
-      target: { tabId },
-      func: (name) => {
-        const all = document.querySelectorAll("button, [role='option'], [role='button'], li, .item, .option, [class*='model'], [class*='Model']");
-        for (const el of all) {
-          if ((el.textContent || "").trim() === name) {
-            if (el.tagName === "OPTION") {
-              el.selected = true;
-              el.parentElement.dispatchEvent(new Event("change", { bubbles: true }));
-              return;
-            }
-            if (el.offsetParent !== null) { el.click(); return; }
-          }
-        }
-        const triggers = document.querySelectorAll("[class*='model-select'], [class*='ModelSelect'], [class*='model-switch'], [class*='model-picker']");
-        for (const t of triggers) { if (t.offsetParent !== null) { t.click(); break; } }
-        setTimeout(() => {
-          const items = document.querySelectorAll("button, [role='option'], li, .item");
-          for (const item of items) { if ((item.textContent || "").trim() === name) { item.click(); break; } }
-        }, 600);
-      },
-      args: [modelName],
-    });
+    await chrome.scripting.executeScript({ target: { tabId }, func: switchModel, args: [modelName] });
   } catch {}
 }
 
 async function injectAndSubmit(tabId, text) {
   try {
-    await chrome.scripting.executeScript({
-      target: { tabId },
-      func: (msg) => {
-        let input = null;
-        const candidates = ["textarea", "[contenteditable='true']", ".ProseMirror", '[role="textbox"]', "#prompt-textarea", "div[data-placeholder]", "form textarea", ".chat-input textarea"];
-        for (const sel of candidates) { input = document.querySelector(sel); if (input && input.offsetParent !== null) break; input = null; }
-        if (!input) { const allTA = document.querySelectorAll("textarea"); for (const ta of allTA) { if (ta.offsetParent !== null) { input = ta; break; } } }
-        if (!input) throw new Error("no input");
-
-        const isCE = input.getAttribute("contenteditable") === "true" || input.classList.contains("ProseMirror") || input.getAttribute("role") === "textbox";
-        if (isCE) {
-          input.focus(); input.textContent = msg;
-          input.dispatchEvent(new InputEvent("input", { bubbles: true, composed: true }));
-          input.dispatchEvent(new Event("change", { bubbles: true }));
-        } else {
-          const proto = input.tagName === "TEXTAREA" ? HTMLTextAreaElement.prototype : HTMLInputElement.prototype;
-          const setter = Object.getOwnPropertyDescriptor(proto, "value").set;
-          setter.call(input, msg);
-          input.dispatchEvent(new Event("input", { bubbles: true }));
-          input.dispatchEvent(new Event("change", { bubbles: true }));
-          input.dispatchEvent(new FocusEvent("focusin", { bubbles: true }));
-          const tracker = input._valueTracker;
-          if (tracker) { tracker.setValue(""); tracker.setValue(msg); }
-          input.focus();
-        }
-
-        const btnCandidates = ["button[type='submit']", "button[aria-label*='send' i]", "button[aria-label*='Send']", "form button", "form [type='submit']", ".send-btn", "#send-button", "#submit-button"];
-        let sendBtn = null;
-        for (const sel of btnCandidates) { sendBtn = document.querySelector(sel); if (sendBtn && sendBtn.offsetParent !== null) break; sendBtn = null; }
-        if (sendBtn) { sendBtn.click(); } else {
-          input.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", code: "Enter", keyCode: 13, which: 13, bubbles: true }));
-        }
-      },
-      args: [text],
-    });
+    await chrome.scripting.executeScript({ target: { tabId }, func: injectAndSubmit, args: [text] });
   } catch (e) { throw new Error("Inject failed: " + e.message); }
 }
 
@@ -198,35 +120,10 @@ async function pollForResponse(tabId, sentText) {
     try {
       const [r] = await chrome.scripting.executeScript({
         target: { tabId },
-        func: (sent) => {
-          const areaSel = [".chat-content", ".conversation", ".messages", ".chat-messages", '[role="log"]', '[role="list"]', "main", ".response", ".ai-response", ".assistant-message", ".markdown-body", ".prose", ".chat-area"];
-          let area = null;
-          for (const s of areaSel) { area = document.querySelector(s); if (area) break; }
-          if (!area) area = document.body;
-          const blocks = area.querySelectorAll("p, div, span, li, pre, code, h1, h2, h3, h4, h5, h6, td, th");
-          const texts = [];
-          for (const b of blocks) {
-            const t = (b.textContent || "").trim();
-            if (t && t.length > 20) {
-              if (b.closest("form, [role='form'], .input-area, .composer, .send-box, textarea, .prompt-box")) continue;
-              if (t.trim() === sent.trim()) continue;
-              texts.push(t);
-            }
-          }
-          const unique = [];
-          for (const t of texts) {
-            let subset = false;
-            for (let i = 0; i < unique.length; i++) {
-              if (unique[i].includes(t)) { subset = true; break; }
-              if (t.includes(unique[i])) { unique[i] = t; subset = true; break; }
-            }
-            if (!subset) unique.push(t);
-          }
-          return unique.join("\n\n");
-        },
+        func: extractResponse,
         args: [sentText],
       });
-      const text = r?.result || "";
+      const text = r?.result?.text || "";
       if (text && text === lastText) {
         stableCount++;
         if (stableCount >= 4) return text;

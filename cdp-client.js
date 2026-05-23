@@ -3,6 +3,8 @@
 // Usage: node cdp-client.js "your question"
 const http = require("http");
 
+const { openModelDropdown, readModelDropdown, clickModel, injectAndSubmit, extractResponse } = require("./shared/sider-page-fns");
+
 const CDP = "http://localhost:9223";
 
 // Parse args: --models a,b,c  or  just the question
@@ -221,6 +223,8 @@ class CDPClient {
     this.ws = ws;
     this.id = 0;
     this.pending = new Map();
+    this._connected = true;
+
     ws.onmessage = (event) => {
       const msg = JSON.parse(event.data);
       if (msg.id && this.pending.has(msg.id)) {
@@ -228,17 +232,31 @@ class CDPClient {
         this.pending.delete(msg.id);
       }
     };
+
+    ws.onclose = () => {
+      this._connected = false;
+      // Reject all pending promises
+      for (const [, reject] of this.pending) {
+        reject(new Error("CDP connection closed"));
+      }
+      this.pending.clear();
+    };
+
+    ws.onerror = () => {
+      this._connected = false;
+    };
   }
 
   send(method, params = {}) {
-    return new Promise((resolve) => {
+    return new Promise((resolve, reject) => {
+      if (!this._connected) return reject(new Error("CDP not connected"));
       const id = ++this.id;
       this.pending.set(id, resolve);
       this.ws.send(JSON.stringify({ id, method, params }));
     });
   }
 
-  close() { this.ws.close(); }
+  close() { this._connected = false; this.ws.close(); }
 
   static connect(wsUrl) {
     return new Promise((resolve, reject) => {
@@ -264,18 +282,15 @@ async function waitForReady(client) {
 }
 
 async function detectModels(client) {
-  // Open dropdown (handles toggle-safety internally)
   await client.send("Runtime.evaluate", {
-    expression: `(${openDropdownFn.toString()})()`,
+    expression: `(${openModelDropdown.toString()})()`,
     returnByValue: true,
   });
   await sleep(800);
-  // Read
   const r = await client.send("Runtime.evaluate", {
-    expression: `(${readDropdownModelsFn.toString()})()`,
+    expression: `(${readModelDropdown.toString()})()`,
     returnByValue: true,
   });
-  // Close
   await client.send("Runtime.evaluate", {
     expression: `document.body.click();`,
     returnByValue: true,
@@ -284,35 +299,32 @@ async function detectModels(client) {
 }
 
 async function switchModel(client, modelName) {
-  // Open dropdown (handles toggle-safety internally)
   await client.send("Runtime.evaluate", {
-    expression: `(${openDropdownFn.toString()})()`,
+    expression: `(${openModelDropdown.toString()})()`,
     returnByValue: true,
   });
   await sleep(600);
-  // Click target
   await client.send("Runtime.evaluate", {
-    expression: `(${clickModelFn.toString()})(${JSON.stringify(modelName)})`,
+    expression: `(${clickModel.toString()})(${JSON.stringify(modelName)})`,
     returnByValue: true,
   });
 }
 
 async function askAndGetResponse(client, question, onTick) {
   const r = await client.send("Runtime.evaluate", {
-    expression: `(${injectAndSubmitFn.toString()})(${JSON.stringify(question)})`,
+    expression: `(${injectAndSubmit.toString()})(${JSON.stringify(question)})`,
     returnByValue: true,
   });
   if (!r.result?.value?.success) {
     return `[发送失败: ${r.result?.value?.error || "未知错误"}]`;
   }
 
-  // Poll for response
   let lastText = "";
   let stable = 0;
   for (let i = 0; i < 120; i++) {
     await sleep(1500);
     const resp = await client.send("Runtime.evaluate", {
-      expression: `(${checkResponseFn.toString()})(${JSON.stringify(question)})`,
+      expression: `(${extractResponse.toString()})(${JSON.stringify(question)})`,
       returnByValue: true,
     });
     const text = resp.result?.value?.text || "";
@@ -327,129 +339,6 @@ async function askAndGetResponse(client, question, onTick) {
   }
   return lastText || "[超时]";
 }
-
-// ============================================================
-// Page-injected functions
-// ============================================================
-const openDropdownFn = () => {
-  // If already open, close first (toggle safety)
-  if (document.querySelector('.model-title')) {
-    document.body.click();
-  }
-  const btns = document.querySelectorAll('.model-btn');
-  for (const b of btns) {
-    const t = (b.textContent || '').trim();
-    if (t.length > 0 && t.length < 20) { b.click(); return; }
-  }
-  if (btns.length) btns[0].click();
-};
-
-const readDropdownModelsFn = () => {
-  const currentBtn = document.querySelector('.model-btn');
-  const current = (currentBtn?.textContent || '').trim();
-
-  const seen = new Set();
-  const options = [];
-  const items = document.querySelectorAll('.model-title');
-  for (const el of items) {
-    const text = (el.textContent || '').trim();
-    if (text.length >= 2 && !seen.has(text)) {
-      seen.add(text);
-      options.push(text);
-    }
-  }
-  return { options: [...options], current };
-};
-
-const clickModelFn = (name) => {
-  const items = document.querySelectorAll('.model-title');
-  for (const el of items) {
-    if ((el.textContent || '').trim() === name) {
-      el.click();
-      return;
-    }
-  }
-};
-
-const injectAndSubmitFn = (text) => {
-  let input = null;
-  const candidates = ["textarea", "[contenteditable='true']", ".ProseMirror", '[role="textbox"]', "#prompt-textarea", "div[data-placeholder]", "form textarea", ".chat-input textarea"];
-  for (const sel of candidates) { input = document.querySelector(sel); if (input && input.offsetParent !== null) break; input = null; }
-  if (!input) { const allTA = document.querySelectorAll("textarea"); for (const ta of allTA) { if (ta.offsetParent !== null) { input = ta; break; } } }
-  if (!input) return { success: false, error: "找不到输入框" };
-
-  const isCE = input.getAttribute("contenteditable") === "true" || input.classList.contains("ProseMirror") || input.getAttribute("role") === "textbox";
-  if (isCE) {
-    input.focus(); input.textContent = text;
-    input.dispatchEvent(new InputEvent("input", { bubbles: true, composed: true }));
-    input.dispatchEvent(new Event("change", { bubbles: true }));
-  } else {
-    const proto = input.tagName === "TEXTAREA" ? HTMLTextAreaElement.prototype : HTMLInputElement.prototype;
-    const setter = Object.getOwnPropertyDescriptor(proto, "value").set;
-    setter.call(input, text);
-    input.dispatchEvent(new Event("input", { bubbles: true }));
-    input.dispatchEvent(new Event("change", { bubbles: true }));
-    input.dispatchEvent(new FocusEvent("focusin", { bubbles: true }));
-    const tracker = input._valueTracker; if (tracker) { tracker.setValue(""); tracker.setValue(text); }
-    input.focus();
-  }
-
-  const btnCandidates = ["button[type='submit']", "button[aria-label*='send' i]", "button[aria-label*='Send']", "form button", "form [type='submit']", ".send-btn", "#send-button", "#submit-button"];
-  let sendBtn = null;
-  for (const sel of btnCandidates) { sendBtn = document.querySelector(sel); if (sendBtn && sendBtn.offsetParent !== null) break; sendBtn = null; }
-  if (sendBtn) { sendBtn.click(); } else {
-    input.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", code: "Enter", keyCode: 13, which: 13, bubbles: true }));
-  }
-  return { success: true };
-};
-
-const checkResponseFn = (sentText) => {
-  // Sider-specific: look for the most recent answer in .answer-markdown-box
-  const answerBoxes = document.querySelectorAll('.answer-markdown-box');
-  if (answerBoxes.length) {
-    const last = answerBoxes[answerBoxes.length - 1];
-    const text = (last.textContent || '').trim();
-    if (text.length > 5) return { text };
-  }
-
-  // Generic AI response selectors
-  const aiSelectors = [
-    ".ai-response", ".assistant-message", ".bot-message", ".response-text",
-    '[class*="assistant"]', '[class*="response"]', '[class*="answer"]',
-    '[class*="bot"]', '[class*="ai-"]', ".markdown-body", ".prose",
-    '[data-role="assistant"]', '[data-message-role="assistant"]',
-    ".message.assistant", ".message.ai", ".chat-message.assistant",
-  ];
-
-  let respEl = null;
-  for (const sel of aiSelectors) {
-    const els = document.querySelectorAll(sel);
-    if (els.length) respEl = els[els.length - 1];
-    if (respEl) break;
-  }
-
-  if (!respEl) {
-    const mainSel = ["main", ".chat-content", ".conversation", ".messages", '[role="log"]', '[role="list"]'];
-    let main = null;
-    for (const s of mainSel) { main = document.querySelector(s); if (main) break; }
-    if (!main) main = document.body;
-
-    const all = main.querySelectorAll("p, div, li, pre, code, h1, h2, h3, h4, h5, h6, span");
-    let best = "";
-    for (const el of all) {
-      const t = (el.textContent || "").trim();
-      if (t.length > best.length && t.length > 50 &&
-          t !== sentText.trim() &&
-          !el.closest("form, [role='form'], .input-area, .composer, .send-box, textarea, .prompt-box, nav, header, footer, [class*='sidebar'], [class*='toolbar']")) {
-        best = t;
-      }
-    }
-    return { text: best };
-  }
-
-  const text = (respEl.textContent || "").trim();
-  return { text };
-};
 
 // ============================================================
 // Utils
