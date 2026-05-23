@@ -142,12 +142,61 @@
     return null;
   }
 
-  // ---- composite operations ----
+  // ---- composite operations (self-contained for page injection) ----
 
   function injectTextOnly(text, inputSelector) {
-    var input = findInput(inputSelector);
+    // inline findInput
+    var input = null;
+    if (inputSelector) input = document.querySelector(inputSelector);
+    if (!input) {
+      var candidates = [
+        "textarea",
+        "[contenteditable='true']",
+        ".ProseMirror",
+        '[role="textbox"]',
+        "#prompt-textarea",
+        "div[data-placeholder]",
+        "form textarea",
+        ".chat-input textarea",
+      ];
+      for (var i = 0; i < candidates.length; i++) {
+        input = document.querySelector(candidates[i]);
+        if (input && input.offsetParent !== null) break;
+        input = null;
+      }
+      if (!input) {
+        var allTA = document.querySelectorAll("textarea");
+        for (var j = 0; j < allTA.length; j++) {
+          if (allTA[j].offsetParent !== null) { input = allTA[j]; break; }
+        }
+      }
+    }
     if (!input) return { success: false, error: "找不到输入框" };
-    setInputValue(input, text);
+
+    // inline setInputValue
+    var isCE =
+      input.getAttribute("contenteditable") === "true" ||
+      input.classList.contains("ProseMirror") ||
+      input.getAttribute("role") === "textbox";
+    if (isCE) {
+      input.focus();
+      input.textContent = text;
+      input.dispatchEvent(new InputEvent("input", { bubbles: true, composed: true }));
+      input.dispatchEvent(new Event("change", { bubbles: true }));
+    } else {
+      var proto = input.tagName === "TEXTAREA"
+        ? HTMLTextAreaElement.prototype
+        : HTMLInputElement.prototype;
+      var setter = Object.getOwnPropertyDescriptor(proto, "value").set;
+      setter.call(input, text);
+      input.dispatchEvent(new Event("input", { bubbles: true }));
+      input.dispatchEvent(new Event("change", { bubbles: true }));
+      input.dispatchEvent(new FocusEvent("focusin", { bubbles: true }));
+      var tracker = input._valueTracker;
+      if (tracker) { tracker.setValue(""); tracker.setValue(text); }
+      input.focus();
+    }
+
     return {
       success: true,
       method:
@@ -158,12 +207,83 @@
   }
 
   function injectAndSubmit(text, inputSelector, sendBtnSelector) {
-    var input = findInput(inputSelector);
+    // inline findInput
+    var input = null;
+    if (inputSelector) input = document.querySelector(inputSelector);
+    if (!input) {
+      var candidates = [
+        "textarea",
+        "[contenteditable='true']",
+        ".ProseMirror",
+        '[role="textbox"]',
+        "#prompt-textarea",
+        "div[data-placeholder]",
+        "form textarea",
+        ".chat-input textarea",
+      ];
+      for (var i = 0; i < candidates.length; i++) {
+        input = document.querySelector(candidates[i]);
+        if (input && input.offsetParent !== null) break;
+        input = null;
+      }
+      if (!input) {
+        var allTA = document.querySelectorAll("textarea");
+        for (var j = 0; j < allTA.length; j++) {
+          if (allTA[j].offsetParent !== null) { input = allTA[j]; break; }
+        }
+      }
+    }
     if (!input) return { success: false, error: "找不到输入框" };
-    setInputValue(input, text);
 
+    // inline setInputValue
+    var isCE =
+      input.getAttribute("contenteditable") === "true" ||
+      input.classList.contains("ProseMirror") ||
+      input.getAttribute("role") === "textbox";
+    if (isCE) {
+      input.focus();
+      input.textContent = text;
+      input.dispatchEvent(new InputEvent("input", { bubbles: true, composed: true }));
+      input.dispatchEvent(new Event("change", { bubbles: true }));
+    } else {
+      var proto =
+        input.tagName === "TEXTAREA"
+          ? HTMLTextAreaElement.prototype
+          : HTMLInputElement.prototype;
+      var setter = Object.getOwnPropertyDescriptor(proto, "value").set;
+      setter.call(input, text);
+      input.dispatchEvent(new Event("input", { bubbles: true }));
+      input.dispatchEvent(new Event("change", { bubbles: true }));
+      input.dispatchEvent(new FocusEvent("focusin", { bubbles: true }));
+      var tracker = input._valueTracker;
+      if (tracker) { tracker.setValue(""); tracker.setValue(text); }
+      input.focus();
+    }
+
+    // inline findAndClickSend
     setTimeout(function () {
-      var sendBtn = findSendButton(sendBtnSelector);
+      var sendBtn = null;
+      if (sendBtnSelector) {
+        sendBtn = document.querySelector(sendBtnSelector);
+        if (!sendBtn || sendBtn.offsetParent === null) sendBtn = null;
+      }
+      if (!sendBtn) {
+        var btnCandidates = [
+          "button[type='submit']",
+          "button[aria-label*='send' i]",
+          "button[aria-label*='Send']",
+          "form button",
+          "form [type='submit']",
+          ".send-btn",
+          "#send-button",
+          "#submit-button",
+        ];
+        for (var k = 0; k < btnCandidates.length; k++) {
+          sendBtn = document.querySelector(btnCandidates[k]);
+          if (sendBtn && sendBtn.offsetParent !== null) break;
+          sendBtn = null;
+        }
+      }
       if (sendBtn) {
         sendBtn.click();
       } else {

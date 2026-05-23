@@ -18,7 +18,16 @@
   "engines": {
     "node": ">=22.0.0"
   },
-  "keywords": ["chrome-extension", "sider", "mcp", "cdp", "multi-model"],
+  "keywords": [
+    "chrome-extension",
+    "sider",
+    "mcp",
+    "cdp",
+    "multi-model"
+  ],
   "author": "chong",
-  "license": "MIT"
+  "license": "MIT",
+  "dependencies": {
+    "ws": "^8.21.0"
+  }
 }
